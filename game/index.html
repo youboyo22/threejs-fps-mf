@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SALTLINE — tactical FPS on three.js</title>
+<!--
+  SALTLINE: a round-based, two-team tactical shooter. TIDE and KILN fight over two
+  uplink sites in a salt refinery; attackers plant the beacon, defenders stop them,
+  money buys the next round's kit. Single-player against bots, static files, no network.
+
+  Layout of the source:
+    src/sim/   the game itself as a fixed 60 Hz simulation, free of three.js and the DOM
+               (config, map, collide, nav, actor, weapons, damage, grenade, economy, round, bots, sim)
+    src/view/  three.js rendering of that state (world, rigs, fx, viewmodel, view)
+    src/       the browser shell (main, loop, input, hud, radar, audio, shots)
+    test/      headless checks run with node: whole bot matches on the real simulation
+-->
+<style>
+  :root { --ink: #14202a; --panel: rgba(20, 32, 42, .78); --cream: #f6efe2; --dim: #a9b4b8; --tide: #17b3a3; --kiln: #f0812a; --warn: #f2c230; --bad: #ff5a4d; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--ink); color: var(--cream); font: 14px/1.35 system-ui, "Segoe UI", Roboto, sans-serif; user-select: none; }
+  canvas#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .num { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  .hide { display: none !important; }
+  #hud { position: fixed; inset: 0; pointer-events: none; text-shadow: 0 1px 2px rgba(0, 0, 0, .6); }
+  .panel { background: var(--panel); border: 1px solid rgba(246, 239, 226, .14); border-radius: 6px; }
+
+  /* top bar: score, clock, who is still up */
+  #top { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: stretch; gap: 2px; }
+  #top .side { width: 132px; padding: 6px 12px; display: flex; align-items: center; gap: 10px; }
+  #top .side b { font-size: 30px; line-height: 1; }
+  #top .side span { font-size: 11px; letter-spacing: .14em; color: var(--dim); display: block; }
+  #top .side i { font-style: normal; letter-spacing: 3px; font-size: 11px; }
+  #top .tide { justify-content: flex-end; text-align: right; border-right: 3px solid var(--tide); } #top .tide b, #top .tide i { color: var(--tide); }
+  #top .kiln { border-left: 3px solid var(--kiln); } #top .kiln b, #top .kiln i { color: var(--kiln); }
+  #clock { width: 120px; text-align: center; padding: 4px 0; }
+  #clock b { font-size: 26px; display: block; line-height: 1.1; } #clock span { font-size: 10px; letter-spacing: .18em; color: var(--dim); }
+  #clock.hot b { color: var(--bad); }
+  #objective { position: absolute; top: 76px; left: 50%; transform: translateX(-50%); padding: 4px 14px; font-size: 13px; white-space: nowrap; }
+
+  #radar { position: absolute; top: 12px; left: 12px; width: 192px; height: 160px; border-radius: 6px; border: 1px solid rgba(246, 239, 226, .25); }
+  #place { position: absolute; top: 178px; left: 12px; width: 192px; text-align: center; font-size: 12px; letter-spacing: .08em; color: var(--dim); }
+  #feed { position: absolute; top: 12px; right: 12px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+  #feed div { padding: 3px 10px; font-size: 13px; } #feed .mine { border-color: var(--warn); }
+  #feed em { font-style: normal; color: var(--dim); margin: 0 8px; font-size: 11px; }
+  .t0 { color: var(--tide); font-weight: 600; } .t1 { color: var(--kiln); font-weight: 600; }
+
+  /* crosshair: four ticks pushed apart by the weapon's current spread */
+  #cross { position: absolute; left: 50%; top: 50%; }
+  #cross i { position: absolute; background: var(--cream); box-shadow: 0 0 2px #000; }
+  #cross i:nth-child(1), #cross i:nth-child(2) { width: 2px; height: 9px; left: -1px; }
+  #cross i:nth-child(3), #cross i:nth-child(4) { width: 9px; height: 2px; top: -1px; }
+  #cross b { position: absolute; width: 2px; height: 2px; left: -1px; top: -1px; background: var(--cream); }
+  #hit { position: absolute; left: 50%; top: 50%; width: 26px; height: 26px; margin: -13px; opacity: 0;
+    background: linear-gradient(45deg, transparent 46%, #fff 46% 54%, transparent 54%), linear-gradient(-45deg, transparent 46%, #fff 46% 54%, transparent 54%); }
+  #hit.head { filter: drop-shadow(0 0 3px var(--bad)); background: linear-gradient(45deg, transparent 44%, var(--bad) 44% 56%, transparent 56%), linear-gradient(-45deg, transparent 44%, var(--bad) 44% 56%, transparent 56%); }
+  #scope { position: absolute; inset: 0; background: radial-gradient(circle at center, transparent 0 34vh, #05090c 34.4vh); }
+  #scope::before, #scope::after { content: ""; position: absolute; background: #05090c; }
+  #scope::before { left: 50%; top: 16vh; bottom: 16vh; width: 1px; } #scope::after { top: 50%; left: calc(50% - 34vh); right: calc(50% - 34vh); height: 1px; }
+  #hurt { position: absolute; inset: 0; opacity: 0; background: radial-gradient(ellipse at center, transparent 45%, rgba(255, 60, 40, .55)); }
+
+  #progress { position: absolute; left: 50%; top: 62%; transform: translateX(-50%); width: 260px; text-align: center; font-size: 12px; letter-spacing: .1em; }
+  #progress div { height: 6px; margin-top: 5px; background: rgba(20, 32, 42, .8); border-radius: 3px; overflow: hidden; }
+  #progress i { display: block; height: 100%; width: 0; background: var(--warn); }
+
+  #vitals, #loadout { position: absolute; bottom: 14px; padding: 8px 16px; display: flex; align-items: baseline; gap: 8px; }
+  #vitals { left: 14px; } #loadout { right: 14px; }
+  #vitals b, #loadout b { font-size: 38px; line-height: 1; } #vitals span, #loadout span { font-size: 12px; color: var(--dim); letter-spacing: .08em; }
+  #vitals b + span { margin-right: 12px; } #armor { color: #8fd0ff; } #hp.low { color: var(--bad); }
+  #status { position: absolute; right: 14px; bottom: 78px; text-align: right; font-size: 13px; }
+  #money { color: #7be08f; font-size: 18px; display: block; } #gear { color: var(--warn); }
+
+  #banner { position: absolute; top: 24%; left: 50%; transform: translateX(-50%); text-align: center; padding: 12px 34px; }
+  #banner b { display: block; font-size: 30px; letter-spacing: .12em; } #banner span { color: var(--dim); }
+  #banner.win b { color: #7be08f; } #banner.loss b { color: var(--bad); }
+  #spectate { position: absolute; bottom: 92px; left: 50%; transform: translateX(-50%); padding: 4px 14px; }
+
+  #buy { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -42%); width: 520px; padding: 14px 16px; }
+  #buy h2 { margin: 0 0 2px; font-size: 15px; letter-spacing: .16em; } #buy p { margin: 0 0 10px; color: var(--dim); font-size: 12px; }
+  .item { display: grid; grid-template-columns: 26px 1fr 90px 110px; white-space: nowrap; align-items: center; gap: 8px; padding: 6px 8px; margin-top: 4px; border-radius: 4px; background: rgba(246, 239, 226, .06); }
+  .item kbd { font: inherit; text-align: center; border: 1px solid rgba(246, 239, 226, .3); border-radius: 3px; }
+  .item small { color: var(--dim); } .item .price { text-align: right; color: #7be08f; }
+  .item.off { opacity: .45; } .item.off .price { color: var(--dim); }
+
+  #board { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 460px; padding: 12px 16px; }
+  #board .row { display: grid; grid-template-columns: 1fr 44px 44px 80px; padding: 3px 0; } #board .row.out { opacity: .4; }
+  #board .head { color: var(--dim); font-size: 11px; letter-spacing: .12em; border-bottom: 1px solid rgba(246, 239, 226, .15); }
+
+  /* menu and pause: title above, controls below, the map turning slowly between them */
+  #menu { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 22px; cursor: pointer; }
+  #menu .card { padding: 14px 34px; text-align: center; }
+  #menu h1 { margin: 0; font-size: 56px; letter-spacing: .2em; line-height: 1; } #menu h1 em { font-style: normal; color: var(--tide); }
+  #menu .tag { color: var(--dim); margin-top: 6px; letter-spacing: .06em; }
+  #menu table { margin: 0 auto 12px; border-spacing: 12px 2px; text-align: left; font-size: 13px; } #menu td:nth-child(odd) { color: var(--warn); text-align: right; }
+  #menu .go { display: inline-block; padding: 9px 28px; border-radius: 4px; background: var(--tide); color: var(--ink); font-weight: 700; letter-spacing: .14em; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.min.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="hud" class="hide">
+  <div id="top">
+    <div class="side tide panel"><div><span>TIDE</span><i id="pips0"></i></div><b id="score0" class="num">0</b></div>
+    <div id="clock" class="panel"><b id="timer" class="num">0:00</b><span id="phase">BUY PHASE</span></div>
+    <div class="side kiln panel"><b id="score1" class="num">0</b><div><span>KILN</span><i id="pips1"></i></div></div>
+  </div>
+  <div id="objective" class="panel"></div>
+  <canvas id="radar" width="192" height="160"></canvas>
+  <div id="place"></div>
+  <div id="feed"></div>
+  <div id="scope" class="hide"></div>
+  <div id="hurt"></div>
+  <div id="cross"><i></i><i></i><i></i><i></i><b></b></div>
+  <div id="hit"></div>
+  <div id="progress" class="hide"><span id="progressLabel"></span><div><i id="progressBar"></i></div></div>
+  <div id="vitals" class="panel"><b id="hp" class="num">100</b><span>HP</span><b id="armor" class="num">0</b><span>VEST</span></div>
+  <div id="status"><span id="money" class="num">$800</span><span id="gear"></span></div>
+  <div id="loadout" class="panel"><span id="weapon"></span><b id="mag" class="num">12</b><span id="res" class="num">/ 36</span></div>
+  <div id="spectate" class="panel hide"></div>
+  <div id="banner" class="panel hide"><b></b><span></span></div>
+  <div id="buy" class="panel hide"><h2>REQUISITION</h2><p>Press a number to buy. Survive the round and you keep your kit.</p></div>
+  <div id="board" class="panel hide"></div>
+</div>
+
+<div id="menu">
+  <div class="card panel">
+    <h1>SALT<em>LINE</em></h1>
+    <div class="tag" id="menuTag">4 v 4 tactical rounds at the Saltworks · plant the beacon or stop it · first to 7 rounds</div>
+  </div>
+  <div class="card panel">
+    <table>
+      <tr><td>W A S D</td><td>move</td><td>Mouse</td><td>aim · left fire · right scope</td><td>E (hold)</td><td>plant / defuse the beacon</td></tr>
+      <tr><td>Ctrl / C</td><td>crouch, tighter aim</td><td>Shift</td><td>walk silently</td><td>G</td><td>throw pulse grenade</td></tr>
+      <tr><td>Space</td><td>jump</td><td>R</td><td>reload</td><td>1 – 7</td><td>buy in the buy phase</td></tr>
+      <tr><td>1 2 Q</td><td>switch weapon</td><td>Tab</td><td>scoreboard</td><td>Esc</td><td>pause</td></tr>
+    </table>
+    <div class="go" id="menuGo">CLICK TO DEPLOY</div>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

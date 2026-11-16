@@ -1,0 +1,6 @@
+[
+  { "name": "01-firefight.jpg", "query": "?shot=firefight&seed=7" },
+  { "name": "02-site-a-planted.jpg", "query": "?shot=planted&seed=7" },
+  { "name": "03-buy-phase.jpg", "query": "?shot=buy&seed=7" },
+  { "name": "04-saltworks-overview.jpg", "query": "?shot=overview&seed=7" }
+]
